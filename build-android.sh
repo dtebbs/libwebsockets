@@ -1,0 +1,3 @@
+
+cd android
+  ndk-build
