@@ -596,7 +596,7 @@ int lws_set_socket_options(struct libwebsocket_context *context, int fd)
 			alive.keepalivetime = context->ka_time;
 			alive.keepaliveinterval = context->ka_interval;
 
-			if (WSAIoctl(fd, SIO_KEEPALIVE_VALS, &alive, sizeof(alive), 
+			if (WSAIoctl(fd, SIO_KEEPALIVE_VALS, &alive, sizeof(alive),
 									NULL, 0, &dwBytesRet, NULL, NULL))
 				return 1;
 		}
@@ -1676,14 +1676,14 @@ OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 	int n;
 	struct libwebsocket_context *context;
 
-	ssl = X509_STORE_CTX_get_ex_data(x509_ctx,
+	ssl = (SSL *)X509_STORE_CTX_get_ex_data(x509_ctx,
 		SSL_get_ex_data_X509_STORE_CTX_idx());
 
 	/*
 	 * !!! nasty openssl requires the index to come as a library-scope
 	 * static
 	 */
-	context = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+	context = (struct libwebsocket_context *)SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
 
 	n = context->protocols[0].callback(NULL, NULL,
 		LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION,
@@ -1977,7 +1977,7 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 	SSL_load_error_strings();
 
 	openssl_websocket_private_data_index =
-		SSL_get_ex_new_index(0, "libwebsockets", NULL, NULL, NULL);
+		SSL_get_ex_new_index(0, (void *)"libwebsockets", NULL, NULL, NULL);
 
 	/*
 	 * Firefox insists on SSLv23 not SSLv3
@@ -1987,7 +1987,7 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 	method = (SSL_METHOD *)SSLv23_server_method();
 	if (!method) {
         int error = ERR_get_error();
-		lwsl_err("problem creating ssl method %lu: %s\n", 
+		lwsl_err("problem creating ssl method %lu: %s\n",
 			error,
 			ERR_error_string(error,
 					      (char *)context->service_buffer));
@@ -2083,7 +2083,7 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 					(char *)context->service_buffer));
 				goto bail;
 			}
-		} 
+		}
 		if (info->ssl_private_key_filepath) {
 			/* set the private key from KeyFile */
 			if (SSL_CTX_use_PrivateKey_file(context->ssl_client_ctx,
@@ -2102,7 +2102,7 @@ libwebsocket_create_context(struct lws_context_creation_info *info)
 				lwsl_err("Private SSL key doesn't match cert\n");
 				goto bail;
 			}
-		} 
+		}
 
 		context->protocols[0].callback(context, NULL,
 			LWS_CALLBACK_OPENSSL_LOAD_EXTRA_CLIENT_VERIFY_CERTS,
@@ -2323,7 +2323,7 @@ bail:
  * @context:	pointer to struct libwebsocket_context you want set proxy to
  * @proxy: pointer to c string containing proxy in format address:port
  *
- * Returns 0 if proxy string was parsed and proxy was setup. 
+ * Returns 0 if proxy string was parsed and proxy was setup.
  * Returns -1 if @proxy is NULL or has incorrect format.
  *
  * This is only required if your OS does not provide the http_proxy
@@ -2340,7 +2340,7 @@ LWS_VISIBLE int
 libwebsocket_set_proxy(struct libwebsocket_context *context, const char *proxy)
 {
 	char *p;
-	
+
 	if (!proxy)
 		return -1;
 
@@ -2348,7 +2348,7 @@ libwebsocket_set_proxy(struct libwebsocket_context *context, const char *proxy)
 				sizeof(context->http_proxy_address) - 1);
 	context->http_proxy_address[
 				sizeof(context->http_proxy_address) - 1] = '\0';
-	
+
 	p = strchr(context->http_proxy_address, ':');
 	if (!p) {
 		lwsl_err("http_proxy needs to be ads:port\n");
@@ -2357,7 +2357,7 @@ libwebsocket_set_proxy(struct libwebsocket_context *context, const char *proxy)
 	}
 	*p = '\0';
 	context->http_proxy_port = atoi(p + 1);
-	
+
 	lwsl_notice(" Proxy %s:%u\n", context->http_proxy_address,
 						context->http_proxy_port);
 

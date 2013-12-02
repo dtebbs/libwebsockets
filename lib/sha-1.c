@@ -65,6 +65,7 @@ typedef unsigned __int64 u_int64_t;
 #endif
 
 #include <string.h>
+#include <strings.h>
 
 struct sha1_ctxt {
 	union {

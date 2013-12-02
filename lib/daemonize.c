@@ -124,7 +124,7 @@ lws_daemonize(const char *_lock_path)
 	}
 
 	n = strlen(_lock_path) + 1;
-	lock_path = malloc(n);
+	lock_path = (char *)malloc(n);
 	if (!lock_path) {
 		fprintf(stderr, "Out of mem in lws_daemonize\n");
 		return 1;
@@ -219,4 +219,3 @@ lws_daemonize(const char *_lock_path)
 
 	return 0;
 }
-

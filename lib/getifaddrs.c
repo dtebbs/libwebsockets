@@ -85,7 +85,7 @@ getifaddrs2(struct ifaddrs **ifap,
 
 	buf_size = 8192;
 	for (;;) {
-		buf = calloc(1, buf_size);
+		buf = (char *)calloc(1, buf_size);
 		if (buf == NULL) {
 			ret = ENOMEM;
 			goto error_out;
@@ -137,12 +137,12 @@ getifaddrs2(struct ifaddrs **ifap,
 			goto error_out;
 		}
 
-		*end = malloc(sizeof(**end));
+		*end = (struct ifaddrs *)malloc(sizeof(**end));
 
 		(*end)->ifa_next = NULL;
 		(*end)->ifa_name = strdup(ifr->ifr_name);
 		(*end)->ifa_flags = ifreq.ifr_flags;
-		(*end)->ifa_addr = malloc(salen);
+		(*end)->ifa_addr = (struct sockaddr *)malloc(salen);
 		memcpy((*end)->ifa_addr, sa, salen);
 		(*end)->ifa_netmask = NULL;
 

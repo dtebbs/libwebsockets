@@ -78,13 +78,13 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 		n = recv(wsi->sock, context->service_buffer,
 					sizeof(context->service_buffer), 0);
 		if (n < 0) {
-			
+
 			if (errno == EAGAIN) {
 				lwsl_debug(
 						   "Proxy read returned EAGAIN... retrying\n");
 				return 0;
 			}
-			
+
 			libwebsocket_close_and_free_session(context, wsi,
 						     LWS_CLOSE_STATUS_NOSTATUS);
 			lwsl_err("ERROR reading from proxy socket\n");
@@ -190,9 +190,9 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 					     "SSL_connect WANT_... retrying\n");
 					libwebsocket_callback_on_writable(
 								  context, wsi);
-					
+
 					wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_SSL;
-					
+
 					return 0; /* no error */
 				}
 				n = -1;
@@ -203,7 +203,7 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 				 * retry if new data comes until we
 				 * run into the connection timeout or win
 				 */
-				
+
 				n = ERR_get_error();
 				if (n != SSL_ERROR_NONE) {
 					lwsl_err("SSL connect error %lu: %s\n",
@@ -217,21 +217,21 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 			wsi->ssl = NULL;
 
 		/* fallthru */
-			
+
 	case LWS_CONNMODE_WS_CLIENT_WAITING_SSL:
-			
+
 		if (wsi->use_ssl) {
-				
+
 			if (wsi->mode == LWS_CONNMODE_WS_CLIENT_WAITING_SSL) {
 				lws_latency_pre(context, wsi);
 				n = SSL_connect(wsi->ssl);
 				lws_latency(context, wsi,
 							"SSL_connect LWS_CONNMODE_WS_CLIENT_WAITING_SSL",
 							n, n > 0);
-				
+
 				if (n < 0) {
 					n = SSL_get_error(wsi->ssl, n);
-					
+
 					if (n == SSL_ERROR_WANT_READ ||
 						n == SSL_ERROR_WANT_WRITE) {
 						/*
@@ -246,19 +246,19 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 						 * are getting serviced inbetweentimes)
 						 * us to get called back when writable.
 						 */
-						
+
 						lwsl_info(
 								  "SSL_connect WANT_... retrying\n");
 						libwebsocket_callback_on_writable(
 														  context, wsi);
-						
+
 						wsi->mode = LWS_CONNMODE_WS_CLIENT_WAITING_SSL;
-						
+
 						return 0; /* no error */
 					}
 					n = -1;
 				}
-				
+
 				if (n <= 0) {
 					/*
 					 * retry if new data comes until we
@@ -274,7 +274,7 @@ int lws_client_socket_service(struct libwebsocket_context *context,
 					}
 				}
 			}
-			
+
 			#ifndef USE_CYASSL
 			/*
 			 * See comment above about CyaSSL certificate
@@ -728,7 +728,7 @@ check_accept:
 	if (!n)
 		n = LWS_MAX_SOCKET_IO_BUF;
 	n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-	wsi->u.ws.rx_user_buffer = malloc(n);
+	wsi->u.ws.rx_user_buffer = (char *)malloc(n);
 	if (!wsi->u.ws.rx_user_buffer) {
 		lwsl_err("Out of Mem allocating rx buffer %d\n", n);
 		goto bail2;
@@ -787,7 +787,8 @@ bail2:
 	if (wsi->u.hdr.ah)
 		free(wsi->u.hdr.ah);
 
-	libwebsocket_close_and_free_session(context, wsi, close_reason);
+	libwebsocket_close_and_free_session(context, wsi,
+                                        (lws_close_status )close_reason);
 
 	return 1;
 }
@@ -947,4 +948,3 @@ libwebsockets_generate_client_handshake(struct libwebsocket_context *context,
 
 	return p;
 }
-

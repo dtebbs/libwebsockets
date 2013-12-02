@@ -50,7 +50,7 @@ int lextable_decode(int pos, char c)
 
 int lws_allocate_header_table(struct libwebsocket *wsi)
 {
-	wsi->u.hdr.ah = malloc(sizeof(*wsi->u.hdr.ah));
+	wsi->u.hdr.ah = (struct allocated_headers *)malloc(sizeof(*wsi->u.hdr.ah));
 	if (wsi->u.hdr.ah == NULL) {
 		lwsl_err("Out of memory\n");
 		return -1;
@@ -254,7 +254,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 			wsi->u.hdr.esc_stash = c;
 			wsi->u.hdr.ues = URIES_SEEN_PERCENT_H1;
 			goto swallow;
-			
+
 		case URIES_SEEN_PERCENT_H1:
 			if (char_to_hex(c) < 0) {
 				/* regurgitate */
@@ -273,7 +273,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 		}
 
 		/*
-		 * special URI processing... 
+		 * special URI processing...
 		 *  convert /.. or /... or /../ etc to /
 		 *  convert /./ to /
 		 *  convert // or /// etc to /
@@ -300,7 +300,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 		case URIPS_SEEN_SLASH_DOT:
 			/* swallow second . */
 			if (c == '.') {
-				/* 
+				/*
 				 * back up one dir level if possible
 				 * safe against header fragmentation because
 				 * the method URI can only be in 1 fragment
@@ -326,7 +326,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 			wsi->u.hdr.ups = URIPS_IDLE;
 			issue_char(wsi, '.');
 			break;
-			
+
 		case URIPS_SEEN_SLASH_DOT_DOT:
 			/* swallow prior .. chars and any subsequent . */
 			if (c == '.')

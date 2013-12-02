@@ -200,7 +200,7 @@ handle_truncated_send:
 		 */
 		lwsl_info("***** new partial send %d sent %d accepted\n", len, n);
 
-		wsi->u.ws.truncated_send_malloc = malloc(len - n);
+		wsi->u.ws.truncated_send_malloc = (unsigned char *)malloc(len - n);
 		if (!wsi->u.ws.truncated_send_malloc) {
 			lwsl_err("truncated send: unable to malloc %d\n",
 								       len - n);

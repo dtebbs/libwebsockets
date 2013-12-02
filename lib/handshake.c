@@ -104,7 +104,7 @@ http_postbody:
 
 		}
 
-		/* 
+		/*
 		 * we need to spill here so everything is seen in the case
 		 * there is no content-length
 		 */
@@ -231,7 +231,8 @@ http_postbody:
 
 				if (wsi->u.http.content_length > 0) {
 					wsi->u.http.body_index = 0;
-					wsi->u.http.post_buffer = malloc(wsi->protocol->rx_buffer_size);
+					wsi->u.http.post_buffer = (unsigned char *)
+                        malloc(wsi->protocol->rx_buffer_size);
 					if (!wsi->u.http.post_buffer) {
 						lwsl_err("Unable to allocate post buffer\n");
 						n = -1;
@@ -376,7 +377,7 @@ leave:
 			if (!n)
 				n = LWS_MAX_SOCKET_IO_BUF;
 			n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-			wsi->u.ws.rx_user_buffer = malloc(n);
+			wsi->u.ws.rx_user_buffer = (char *)malloc(n);
 			if (!wsi->u.ws.rx_user_buffer) {
 				lwsl_err("Out of Mem allocating rx buffer %d\n", n);
 				goto bail;
