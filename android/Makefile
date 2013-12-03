@@ -1,14 +1,17 @@
+
+websockets:
+
 BUILDDIR := ../../../tzbuild
 
 ANDROID_NDK := $(BUILDDIR)/../android/android-ndk-r9b
 
 include $(BUILDDIR)/config.mk
 
-libwebsockets_src := $(wildcard ../lib/*.c)
-libwebsockets_incdirs := ../lib jni
-libwebsockets_cxxflags := -DLWS_BUILTIN_GETIFADDRS -Wno-error -Os
-libwebsockets_unity := 1
+websockets_src := $(wildcard ../lib/*.c)
+websockets_incdirs := ../lib jni
+websockets_cxxflags := -DLWS_BUILTIN_GETIFADDRS -Wno-error -Os
+websockets_unity := 1
 
-LIBS += libwebsockets
+LIBS += websockets
 
 include $(BUILDDIR)/rules.mk
