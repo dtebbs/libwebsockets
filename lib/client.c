@@ -788,7 +788,7 @@ bail2:
 		free(wsi->u.hdr.ah);
 
 	libwebsocket_close_and_free_session(context, wsi,
-                                        (lws_close_status )close_reason);
+                                        (enum lws_close_status )close_reason);
 
 	return 1;
 }
