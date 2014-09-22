@@ -21,10 +21,15 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <getopt.h>
 #include <string.h>
 #include <signal.h>
+
+#ifdef _WIN32
+#define random rand
+#else
+#include <unistd.h>
+#endif
 
 #ifdef CMAKE_BUILD
 #include "lws_config.h"
@@ -38,7 +43,7 @@ static int deny_deflate;
 static int deny_mux;
 static struct libwebsocket *wsi_mirror;
 static int mirror_lifetime = 0;
-static int force_exit = 0;
+static volatile int force_exit = 0;
 static int longlived = 0;
 
 /*

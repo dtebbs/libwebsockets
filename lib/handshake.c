@@ -58,10 +58,6 @@ libwebsocket_read(struct libwebsocket_context *context,
 		     struct libwebsocket *wsi, unsigned char *buf, size_t len)
 {
 	size_t n;
-	struct allocated_headers *ah;
-	char *uri_ptr = NULL;
-	int uri_len = 0;
-	char content_length_str[32];
 
 	switch (wsi->state) {
 
@@ -74,8 +70,11 @@ http_postbody:
 
 			wsi->u.http.post_buffer[wsi->u.http.body_index++] = *buf++;
 			wsi->u.http.content_length_seen++;
-			if (wsi->u.http.body_index !=
-					wsi->protocol->rx_buffer_size &&
+			n = wsi->protocol->rx_buffer_size;
+			if (!n)
+				n = LWS_MAX_SOCKET_IO_BUF;
+
+			if (wsi->u.http.body_index != n &&
 			    wsi->u.http.content_length_seen != wsi->u.http.content_length)
 				continue;
 
@@ -104,7 +103,7 @@ http_postbody:
 
 		}
 
-		/*
+		/* 
 		 * we need to spill here so everything is seen in the case
 		 * there is no content-length
 		 */
@@ -130,296 +129,30 @@ http_postbody:
 
 		lwsl_parser("issuing %d bytes to parser\n", (int)len);
 
-#ifndef LWS_NO_CLIENT
-		switch (wsi->mode) {
-		case LWS_CONNMODE_WS_CLIENT_WAITING_PROXY_REPLY:
-		case LWS_CONNMODE_WS_CLIENT_ISSUE_HANDSHAKE:
-		case LWS_CONNMODE_WS_CLIENT_WAITING_SERVER_REPLY:
-		case LWS_CONNMODE_WS_CLIENT_WAITING_EXTENSION_CONNECT:
-		case LWS_CONNMODE_WS_CLIENT:
-			for (n = 0; n < len; n++)
-				if (libwebsocket_client_rx_sm(wsi, *buf++)) {
-					lwsl_info("client_rx_sm failed\n");
-					goto bail;
-				}
-			return 0;
-		default:
-			break;
+		if (lws_handshake_client(wsi, &buf, len))
+			goto bail;
+
+		switch (lws_handshake_server(context, wsi, &buf, len)) {
+		case 1:
+			goto bail;
+		case 2:
+			goto http_postbody;
 		}
-#endif
-#ifndef LWS_NO_SERVER
-		/* LWS_CONNMODE_WS_SERVING */
-
-		while (len--) {
-			if (libwebsocket_parse(wsi, *buf++)) {
-				lwsl_info("libwebsocket_parse failed\n");
-				goto bail_nuke_ah;
-			}
-
-			if (wsi->u.hdr.parser_state != WSI_PARSING_COMPLETE)
-				continue;
-
-			lwsl_parser("libwebsocket_parse sees parsing complete\n");
-
-			wsi->mode = LWS_CONNMODE_PRE_WS_SERVING_ACCEPT;
-
-			/* is this websocket protocol or normal http 1.0? */
-
-			if (!lws_hdr_total_length(wsi, WSI_TOKEN_UPGRADE) ||
-				     !lws_hdr_total_length(wsi, WSI_TOKEN_CONNECTION)) {
-
-				/* it's not websocket.... shall we accept it as http? */
-
-				if (!lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) &&
-				    !lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI)) {
-					lwsl_warn("Missing URI in HTTP request\n");
-					goto bail_nuke_ah;
-				}
-
-				if (lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI) &&
-				    lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI)) {
-					lwsl_warn("GET and POST methods?\n");
-					goto bail_nuke_ah;
-				}
-
-				if (libwebsocket_ensure_user_space(wsi))
-					goto bail_nuke_ah;
-
-				if (lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI)) {
-					uri_ptr = lws_hdr_simple_ptr(wsi, WSI_TOKEN_GET_URI);
-					uri_len = lws_hdr_total_length(wsi, WSI_TOKEN_GET_URI);
-					lwsl_info("HTTP GET request for '%s'\n",
-					    lws_hdr_simple_ptr(wsi, WSI_TOKEN_GET_URI));
-
-				}
-				if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI)) {
-					lwsl_info("HTTP POST request for '%s'\n",
-					   lws_hdr_simple_ptr(wsi, WSI_TOKEN_POST_URI));
-					uri_ptr = lws_hdr_simple_ptr(wsi, WSI_TOKEN_POST_URI);
-					uri_len = lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI);
-				}
-
-				/*
-				 * Hm we still need the headers so the
-				 * callback can look at leaders like the URI, but we
-				 * need to transition to http union state.... hold a
-				 * copy of u.hdr.ah and deallocate afterwards
-				 */
-				ah = wsi->u.hdr.ah;
-
-				/* union transition */
-				memset(&wsi->u, 0, sizeof(wsi->u));
-				wsi->mode = LWS_CONNMODE_HTTP_SERVING_ACCEPTED;
-				wsi->state = WSI_STATE_HTTP;
-				wsi->u.http.fd = -1;
-
-				/* expose it at the same offset as u.hdr */
-				wsi->u.http.ah = ah;
-
-				/* HTTP header had a content length? */
-
-				wsi->u.http.content_length = 0;
-				if (lws_hdr_total_length(wsi, WSI_TOKEN_POST_URI))
-					wsi->u.http.content_length = 100 * 1024 * 1024;
-
-				if (lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH)) {
-					lws_hdr_copy(wsi, content_length_str,
-							sizeof(content_length_str) - 1,
-									WSI_TOKEN_HTTP_CONTENT_LENGTH);
-					wsi->u.http.content_length = atoi(content_length_str);
-				}
-
-				if (wsi->u.http.content_length > 0) {
-					wsi->u.http.body_index = 0;
-					wsi->u.http.post_buffer = (unsigned char *)
-                        malloc(wsi->protocol->rx_buffer_size);
-					if (!wsi->u.http.post_buffer) {
-						lwsl_err("Unable to allocate post buffer\n");
-						n = -1;
-						goto leave;
-					}
-				}
-
-				n = 0;
-				if (wsi->protocol->callback)
-					n = wsi->protocol->callback(context, wsi,
-						LWS_CALLBACK_FILTER_HTTP_CONNECTION,
-						     wsi->user_space, uri_ptr, uri_len);
-
-				if (!n && wsi->protocol->callback)
-					n = wsi->protocol->callback(context, wsi,
-					    LWS_CALLBACK_HTTP,
-					    wsi->user_space, uri_ptr, uri_len);
-
-leave:
-				/* now drop the header info we kept a pointer to */
-				if (ah)
-					free(ah);
-				/* not possible to continue to use past here */
-				wsi->u.http.ah = NULL;
-
-				if (n) {
-					lwsl_info("LWS_CALLBACK_HTTP closing\n");
-					goto bail; /* struct ah ptr already nuked */
-				}
-
-				/*
-				 * if there is content supposed to be coming,
-				 * put a timeout on it having arrived
-				 */
-				libwebsocket_set_timeout(wsi,
-					PENDING_TIMEOUT_HTTP_CONTENT,
-							      AWAITING_TIMEOUT);
-
-				/*
-				 * deal with anything else as body, whether
-				 * there was a content-length or not
-				 */
-
-				wsi->state = WSI_STATE_HTTP_BODY;
-				goto http_postbody;
-			}
-
-			if (!wsi->protocol)
-				lwsl_err("NULL protocol at libwebsocket_read\n");
-
-			/*
-			 * It's websocket
-			 *
-			 * Make sure user side is happy about protocol
-			 */
-
-			while (wsi->protocol->callback) {
-
-				if (!lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL)) {
-					if (wsi->protocol->name == NULL)
-						break;
-				} else
-					if (wsi->protocol->name && strcmp(
-						lws_hdr_simple_ptr(wsi,
-							WSI_TOKEN_PROTOCOL),
-							      wsi->protocol->name) == 0)
-						break;
-
-				wsi->protocol++;
-			}
-
-			/* we didn't find a protocol he wanted? */
-
-			if (wsi->protocol->callback == NULL) {
-				if (lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL) ==
-										 NULL) {
-					lwsl_info("no protocol -> prot 0 handler\n");
-					wsi->protocol = &context->protocols[0];
-				} else {
-					lwsl_err("Req protocol %s not supported\n",
-					   lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL));
-					goto bail_nuke_ah;
-				}
-			}
-
-			/* allocate wsi->user storage */
-			if (libwebsocket_ensure_user_space(wsi))
-				goto bail_nuke_ah;
-
-			/*
-			 * Give the user code a chance to study the request and
-			 * have the opportunity to deny it
-			 */
-
-			if ((wsi->protocol->callback)(wsi->protocol->owning_server, wsi,
-					LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION,
-					wsi->user_space,
-				      lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL), 0)) {
-				lwsl_warn("User code denied connection\n");
-				goto bail_nuke_ah;
-			}
-
-
-			/*
-			 * Perform the handshake according to the protocol version the
-			 * client announced
-			 */
-
-			switch (wsi->ietf_spec_revision) {
-			case 13:
-				lwsl_parser("lws_parse calling handshake_04\n");
-				if (handshake_0405(context, wsi)) {
-					lwsl_info("hs0405 has failed the connection\n");
-					goto bail_nuke_ah;
-				}
-				break;
-
-			default:
-				lwsl_warn("Unknown client spec version %d\n",
-							       wsi->ietf_spec_revision);
-				goto bail_nuke_ah;
-			}
-
-			/* drop the header info -- no bail_nuke_ah after this */
-
-			if (wsi->u.hdr.ah)
-				free(wsi->u.hdr.ah);
-
-			wsi->mode = LWS_CONNMODE_WS_SERVING;
-
-			/* union transition */
-			memset(&wsi->u, 0, sizeof(wsi->u));
-			wsi->u.ws.rxflow_change_to = LWS_RXFLOW_ALLOW;
-
-			/*
-			 * create the frame buffer for this connection according to the
-			 * size mentioned in the protocol definition.  If 0 there, use
-			 * a big default for compatibility
-			 */
-
-			n = wsi->protocol->rx_buffer_size;
-			if (!n)
-				n = LWS_MAX_SOCKET_IO_BUF;
-			n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-			wsi->u.ws.rx_user_buffer = (char *)malloc(n);
-			if (!wsi->u.ws.rx_user_buffer) {
-				lwsl_err("Out of Mem allocating rx buffer %d\n", n);
-				goto bail;
-			}
-			lwsl_info("Allocating RX buffer %d\n", n);
-
-			if (setsockopt(wsi->sock, SOL_SOCKET, SO_SNDBUF,  &n, sizeof n)) {
-				lwsl_warn("Failed to set SNDBUF to %d", n);
-				goto bail;
-			}
-
-			lwsl_parser("accepted v%02d connection\n",
-							       wsi->ietf_spec_revision);
-#endif
-		} /* while all chars are handled */
 		break;
 
 	case WSI_STATE_AWAITING_CLOSE_ACK:
 	case WSI_STATE_ESTABLISHED:
-#ifndef LWS_NO_CLIENT
+		if (lws_handshake_client(wsi, &buf, len))
+			goto bail;
 		switch (wsi->mode) {
-		case LWS_CONNMODE_WS_CLIENT:
-			for (n = 0; n < len; n++)
-				if (libwebsocket_client_rx_sm(
-							     wsi, *buf++) < 0) {
-					lwsl_info("client rx has bailed\n");
-					goto bail;
-				}
+		case LWS_CONNMODE_WS_SERVING:
 
-			return 0;
-		default:
+			if (libwebsocket_interpret_incoming_packet(wsi, buf, len) < 0) {
+				lwsl_info("interpret_incoming_packet has bailed\n");
+				goto bail;
+			}
 			break;
 		}
-#endif
-#ifndef LWS_NO_SERVER
-		/* LWS_CONNMODE_WS_SERVING */
-
-		if (libwebsocket_interpret_incoming_packet(wsi, buf, len) < 0) {
-			lwsl_info("interpret_incoming_packet has bailed\n");
-			goto bail;
-		}
-#endif
 		break;
 	default:
 		lwsl_err("libwebsocket_read: Unhandled state\n");
@@ -428,13 +161,8 @@ leave:
 
 	return 0;
 
-bail_nuke_ah:
-	/* drop the header info */
-	if (wsi->u.hdr.ah)
-		free(wsi->u.hdr.ah);
-
 bail:
-	lwsl_info("closing connection at libwebsocket_read bail:\n");
+	lwsl_debug("closing connection at libwebsocket_read bail:\n");
 
 	libwebsocket_close_and_free_session(context, wsi,
 						     LWS_CLOSE_STATUS_NOSTATUS);

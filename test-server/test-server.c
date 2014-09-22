@@ -24,31 +24,23 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <getopt.h>
+#include <signal.h>
 #include <string.h>
-#include <sys/time.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <assert.h>
-#ifdef WIN32
 
+#ifdef _WIN32
+#include <io.h>
 #ifdef EXTERNAL_POLL
-	#ifndef WIN32_LEAN_AND_MEAN
-	#define WIN32_LEAN_AND_MEAN
-	#endif
-	#include <winsock2.h>
-	#include <ws2tcpip.h>
-	#include <stddef.h>
-
-	#include "websock-w32.h"
+#define poll WSAPoll
 #endif
-
-#else // NOT WIN32
+#else
 #include <syslog.h>
+#include <sys/time.h>
+#include <unistd.h>
 #endif
-
-#include <signal.h>
 
 #include "../lib/libwebsockets.h"
 
@@ -58,7 +50,8 @@ int max_poll_elements;
 struct pollfd *pollfds;
 int *fd_lookup;
 int count_pollfds;
-int force_exit = 0;
+static volatile int force_exit = 0;
+static struct libwebsocket_context *context;
 
 /*
  * This demo server shows how to use libwebsockets for one or more
@@ -211,7 +204,7 @@ static int callback_http(struct libwebsocket_context *context,
 			(struct per_session_data__http *)user;
 	const char *mimetype;
 #ifdef EXTERNAL_POLL
-	int fd = (int)(long)in;
+	struct libwebsocket_pollargs *pa = (struct libwebsocket_pollargs *)in;
 #endif
 
 	switch (reason) {
@@ -377,7 +370,7 @@ static int callback_http(struct libwebsocket_context *context,
 				goto bail;
 			/* sent it all, close conn */
 			if (n == 0)
-				goto bail;
+				goto flush_bail;
 			/*
 			 * because it's HTTP and not websocket, don't need to take
 			 * care about pre and postamble
@@ -390,9 +383,19 @@ static int callback_http(struct libwebsocket_context *context,
 				/* partial write, adjust */
 				lseek(pss->fd, m - n, SEEK_CUR);
 
+			if (m) /* while still active, extend timeout */
+				libwebsocket_set_timeout(wsi,
+					PENDING_TIMEOUT_HTTP_CONTENT, 5);
+
 		} while (!lws_send_pipe_choked(wsi));
 		libwebsocket_callback_on_writable(context, wsi);
 		break;
+flush_bail:
+		/* true if still partial pending */
+		if (lws_send_pipe_choked(wsi)) {
+			libwebsocket_callback_on_writable(context, wsi);
+			break;
+		}
 
 bail:
 		close(pss->fd);
@@ -423,6 +426,20 @@ bail:
 	 * protocol 0 callback
 	 */
 
+	case LWS_CALLBACK_LOCK_POLL:
+		/*
+		 * lock mutex to protect pollfd state
+		 * called before any other POLL related callback
+		 */
+		break;
+
+	case LWS_CALLBACK_UNLOCK_POLL:
+		/*
+		 * unlock mutex to protect pollfd state when
+		 * called after any other POLL related callback
+		 */
+		break;
+
 	case LWS_CALLBACK_ADD_POLL_FD:
 
 		if (count_pollfds >= max_poll_elements) {
@@ -430,29 +447,38 @@ bail:
 			return 1;
 		}
 
-		fd_lookup[fd] = count_pollfds;
-		pollfds[count_pollfds].fd = fd;
-		pollfds[count_pollfds].events = (int)(long)len;
+		fd_lookup[pa->fd] = count_pollfds;
+		pollfds[count_pollfds].fd = pa->fd;
+		pollfds[count_pollfds].events = pa->events;
 		pollfds[count_pollfds++].revents = 0;
 		break;
 
 	case LWS_CALLBACK_DEL_POLL_FD:
 		if (!--count_pollfds)
 			break;
-		m = fd_lookup[fd];
+		m = fd_lookup[pa->fd];
 		/* have the last guy take up the vacant slot */
 		pollfds[m] = pollfds[count_pollfds];
 		fd_lookup[pollfds[count_pollfds].fd] = m;
 		break;
 
-	case LWS_CALLBACK_SET_MODE_POLL_FD:
-		pollfds[fd_lookup[fd]].events |= (int)(long)len;
+	case LWS_CALLBACK_CHANGE_MODE_POLL_FD:
+	        pollfds[fd_lookup[pa->fd]].events = pa->events;
 		break;
 
-	case LWS_CALLBACK_CLEAR_MODE_POLL_FD:
-		pollfds[fd_lookup[fd]].events &= ~(int)(long)len;
-		break;
 #endif
+
+	case LWS_CALLBACK_GET_THREAD_ID:
+		/*
+		 * if you will call "libwebsocket_callback_on_writable"
+		 * from a different thread, return the caller thread ID
+		 * here so lws can use this information to work out if it
+		 * should signal the poll() loop to exit and restart early
+		 */
+
+		/* return pthread_getthreadid_np(); */
+
+		break;
 
 	default:
 		break;
@@ -586,7 +612,7 @@ callback_lws_mirror(struct libwebsocket_context *context,
 				   LWS_SEND_BUFFER_PRE_PADDING,
 				   ringbuffer[pss->ringbuffer_tail].len,
 								LWS_WRITE_TEXT);
-			if (n < ringbuffer[pss->ringbuffer_tail].len) {
+			if (n < 0) {
 				lwsl_err("ERROR %d writing to mirror socket\n", n);
 				return -1;
 			}
@@ -614,7 +640,11 @@ callback_lws_mirror(struct libwebsocket_context *context,
 			 * for tests with chrome on same machine as client and
 			 * server, this is needed to stop chrome choking
 			 */
+#ifdef _WIN32
+			Sleep(1);
+#else
 			usleep(1);
+#endif
 		}
 		break;
 
@@ -702,6 +732,7 @@ static struct libwebsocket_protocols protocols[] = {
 void sighandler(int sig)
 {
 	force_exit = 1;
+	libwebsocket_cancel_service(context);
 }
 
 static struct option options[] = {
@@ -709,9 +740,11 @@ static struct option options[] = {
 	{ "debug",	required_argument,	NULL, 'd' },
 	{ "port",	required_argument,	NULL, 'p' },
 	{ "ssl",	no_argument,		NULL, 's' },
+	{ "allow-non-ssl",	no_argument,		NULL, 'a' },
 	{ "interface",  required_argument,	NULL, 'i' },
 	{ "closetest",  no_argument,		NULL, 'c' },
-#ifndef LWS_NO_DAEMONIZE
+	{ "libev",  no_argument,		NULL, 'e' },
+	#ifndef LWS_NO_DAEMONIZE
 	{ "daemonize", 	no_argument,		NULL, 'D' },
 #endif
 	{ "resource_path", required_argument,		NULL, 'r' },
@@ -724,14 +757,13 @@ int main(int argc, char **argv)
 	char key_path[1024];
 	int n = 0;
 	int use_ssl = 0;
-	struct libwebsocket_context *context;
 	int opts = 0;
 	char interface_name[128] = "";
 	const char *iface = NULL;
 #ifndef WIN32
 	int syslog_options = LOG_PID | LOG_PERROR;
 #endif
-	unsigned int oldus = 0;
+	unsigned int ms, oldms = 0;
 	struct lws_context_creation_info info;
 
 	int debug_level = 7;
@@ -743,10 +775,13 @@ int main(int argc, char **argv)
 	info.port = 7681;
 
 	while (n >= 0) {
-		n = getopt_long(argc, argv, "ci:hsp:d:Dr:", options, NULL);
+		n = getopt_long(argc, argv, "eci:hsap:d:Dr:", options, NULL);
 		if (n < 0)
 			continue;
 		switch (n) {
+		case 'e':
+			opts |= LWS_SERVER_OPTION_LIBEV;
+			break;
 #ifndef LWS_NO_DAEMONIZE
 		case 'D':
 			daemonize = 1;
@@ -760,6 +795,9 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			use_ssl = 1;
+			break;
+		case 'a':
+			opts |= LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT;
 			break;
 		case 'p':
 			info.port = atoi(optarg);
@@ -871,9 +909,10 @@ int main(int argc, char **argv)
 		 * as soon as it can take more packets (usually immediately)
 		 */
 
-		if (((unsigned int)tv.tv_usec - oldus) > 50000) {
+		ms = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
+		if ((ms - oldms) > 50) {
 			libwebsocket_callback_on_writable_all_protocol(&protocols[PROTOCOL_DUMB_INCREMENT]);
-			oldus = tv.tv_usec;
+			oldms = ms;
 		}
 
 #ifdef EXTERNAL_POLL

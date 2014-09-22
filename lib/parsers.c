@@ -21,31 +21,38 @@
 
 #include "private-libwebsockets.h"
 
-#if defined(WIN32) || defined(_WIN32)
-#include <io.h>
-#endif
-
-
 unsigned char lextable[] = {
 	#include "lextable.h"
 };
 
+#define FAIL_CHAR 0x08
+
 int lextable_decode(int pos, char c)
 {
-	while (pos >= 0) {
-		if (lextable[pos + 1] == 0) /* terminal marker */
+
+	c = tolower(c);
+
+	while (1) {
+		if (lextable[pos] & (1 << 7)) { /* 1-byte, fail on mismatch */
+			if ((lextable[pos] & 0x7f) != c)
+				return -1;
+			/* fall thru */
+			pos++;
+			if (lextable[pos] == FAIL_CHAR)
+				return -1;
+			return pos;
+		}
+		/* b7 = 0, end or 3-byte */
+		if (lextable[pos] < FAIL_CHAR) /* terminal marker */
 			return pos;
 
-		/* case insensitive - RFC2616 */
-		if ((lextable[pos] & 0x7f) == tolower(c))
-			return pos + (lextable[pos + 1] << 1);
-
-		if (lextable[pos] & 0x80)
-			return -1;
-
-		pos += 2;
+		if (lextable[pos] == c) /* goto */
+			return pos + (lextable[pos + 1]) +
+						(lextable[pos + 2] << 8);
+		/* fall thru goto */
+		pos += 3;
+		/* continue */
 	}
-	return pos;
 }
 
 int lws_allocate_header_table(struct libwebsocket *wsi)
@@ -68,9 +75,8 @@ LWS_VISIBLE int lws_hdr_total_length(struct libwebsocket *wsi, enum lws_token_in
 	int len = 0;
 
 	n = wsi->u.hdr.ah->frag_index[h];
-	if (n == 0)
+	if (!n)
 		return 0;
-
 	do {
 		len += wsi->u.hdr.ah->frags[n].len;
 		n = wsi->u.hdr.ah->frags[n].next_frag_index;
@@ -89,7 +95,7 @@ LWS_VISIBLE int lws_hdr_copy(struct libwebsocket *wsi, char *dest, int len,
 		return -1;
 
 	n = wsi->u.hdr.ah->frag_index[h];
-	if (n == 0)
+	if (!n)
 		return 0;
 
 	do {
@@ -165,6 +171,13 @@ static int issue_char(struct libwebsocket *wsi, unsigned char c)
 		lwsl_warn("excessive header content\n");
 		return -1;
 	}
+
+	if( wsi->u.hdr.ah->frags[wsi->u.hdr.ah->next_frag_index].len >= 
+		wsi->u.hdr.current_token_limit) {
+		lwsl_warn("header %i exceeds limit\n", wsi->u.hdr.parser_state);
+		return 1;
+	};
+
 	wsi->u.hdr.ah->data[wsi->u.hdr.ah->pos++] = c;
 	if (c)
 		wsi->u.hdr.ah->frags[wsi->u.hdr.ah->next_frag_index].len++;
@@ -172,13 +185,16 @@ static int issue_char(struct libwebsocket *wsi, unsigned char c)
 	return 0;
 }
 
-int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
+int libwebsocket_parse(
+		struct libwebsocket_context *context,
+		struct libwebsocket *wsi, unsigned char c)
 {
 	int n;
 
 	switch (wsi->u.hdr.parser_state) {
 	case WSI_TOKEN_GET_URI:
 	case WSI_TOKEN_POST_URI:
+	case WSI_TOKEN_OPTIONS_URI:
 	case WSI_TOKEN_HOST:
 	case WSI_TOKEN_CONNECTION:
 	case WSI_TOKEN_KEY1:
@@ -196,7 +212,9 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 	case WSI_TOKEN_EXTENSIONS:
 	case WSI_TOKEN_HTTP:
 	case WSI_TOKEN_HTTP_ACCEPT:
+	case WSI_TOKEN_HTTP_AC_REQUEST_HEADERS:
 	case WSI_TOKEN_HTTP_IF_MODIFIED_SINCE:
+	case WSI_TOKEN_HTTP_IF_NONE_MATCH:
 	case WSI_TOKEN_HTTP_ACCEPT_ENCODING:
 	case WSI_TOKEN_HTTP_ACCEPT_LANGUAGE:
 	case WSI_TOKEN_HTTP_PRAGMA:
@@ -218,7 +236,9 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 				      wsi->u.hdr.parser_state]].len && c == ' ')
 			break;
 
-		if ((wsi->u.hdr.parser_state != WSI_TOKEN_GET_URI) && (wsi->u.hdr.parser_state != WSI_TOKEN_POST_URI))
+		if ((wsi->u.hdr.parser_state != WSI_TOKEN_GET_URI) &&
+			(wsi->u.hdr.parser_state != WSI_TOKEN_POST_URI) &&
+			(wsi->u.hdr.parser_state != WSI_TOKEN_OPTIONS_URI))
 			goto check_eol;
 
 		/* special URI processing... end at space */
@@ -254,14 +274,14 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 			wsi->u.hdr.esc_stash = c;
 			wsi->u.hdr.ues = URIES_SEEN_PERCENT_H1;
 			goto swallow;
-
+			
 		case URIES_SEEN_PERCENT_H1:
 			if (char_to_hex(c) < 0) {
 				/* regurgitate */
 				issue_char(wsi, '%');
 				wsi->u.hdr.ues = URIES_IDLE;
 				/* regurgitate + assess */
-				if (libwebsocket_parse(wsi, wsi->u.hdr.esc_stash) < 0)
+				if (libwebsocket_parse(context, wsi, wsi->u.hdr.esc_stash) < 0)
 					return -1;
 				/* continue on to assess c */
 				break;
@@ -273,7 +293,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 		}
 
 		/*
-		 * special URI processing...
+		 * special URI processing... 
 		 *  convert /.. or /... or /../ etc to /
 		 *  convert /./ to /
 		 *  convert // or /// etc to /
@@ -300,7 +320,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 		case URIPS_SEEN_SLASH_DOT:
 			/* swallow second . */
 			if (c == '.') {
-				/*
+				/* 
 				 * back up one dir level if possible
 				 * safe against header fragmentation because
 				 * the method URI can only be in 1 fragment
@@ -326,7 +346,7 @@ int libwebsocket_parse(struct libwebsocket *wsi, unsigned char c)
 			wsi->u.hdr.ups = URIPS_IDLE;
 			issue_char(wsi, '.');
 			break;
-
+			
 		case URIPS_SEEN_SLASH_DOT_DOT:
 			/* swallow prior .. chars and any subsequent . */
 			if (c == '.')
@@ -375,8 +395,15 @@ check_eol:
 		}
 
 spill:
-		if (issue_char(wsi, c) < 0)
-			return -1;
+		{
+			int issue_result = issue_char(wsi, c);
+			if (issue_result < 0) {
+				return -1;
+			}
+			else if(issue_result > 0) {
+				wsi->u.hdr.parser_state = WSI_TOKEN_SKIPPING;
+			};
+		};
 swallow:
 		/* per-protocol end of headers management */
 
@@ -393,8 +420,10 @@ swallow:
 
 		if (wsi->u.hdr.lextable_pos < 0) {
 			/* this is not a header we know about */
-			if (wsi->u.hdr.ah->frag_index[WSI_TOKEN_GET_URI] || wsi->u.hdr.ah->frag_index[WSI_TOKEN_POST_URI] ||
-				    wsi->u.hdr.ah->frag_index[WSI_TOKEN_HTTP]) {
+			if (wsi->u.hdr.ah->frag_index[WSI_TOKEN_GET_URI] ||
+				wsi->u.hdr.ah->frag_index[WSI_TOKEN_POST_URI] ||
+				wsi->u.hdr.ah->frag_index[WSI_TOKEN_OPTIONS_URI] ||
+				wsi->u.hdr.ah->frag_index[WSI_TOKEN_HTTP]) {
 				/*
 				 * altready had the method, no idea what
 				 * this crap is, ignore
@@ -410,14 +439,13 @@ swallow:
 			lwsl_info("Unknown method - dropping\n");
 			return -1;
 		}
-		if (lextable[wsi->u.hdr.lextable_pos + 1] == 0) {
+		if (lextable[wsi->u.hdr.lextable_pos] < FAIL_CHAR) {
 
 			/* terminal state */
 
-			n = lextable[wsi->u.hdr.lextable_pos] & 0x7f;
+			n = (lextable[wsi->u.hdr.lextable_pos] << 8) | lextable[wsi->u.hdr.lextable_pos + 1];
 
 			lwsl_parser("known hdr %d\n", n);
-
 			if (n == WSI_TOKEN_GET_URI &&
 				wsi->u.hdr.ah->frag_index[WSI_TOKEN_GET_URI]) {
 				lwsl_warn("Duplicated GET\n");
@@ -425,6 +453,10 @@ swallow:
 			} else if (n == WSI_TOKEN_POST_URI &&
 				wsi->u.hdr.ah->frag_index[WSI_TOKEN_POST_URI]) {
 				lwsl_warn("Duplicated POST\n");
+				return -1;
+			} else if (n == WSI_TOKEN_OPTIONS_URI &&
+				wsi->u.hdr.ah->frag_index[WSI_TOKEN_OPTIONS_URI]) {
+				lwsl_warn("Duplicated OPTIONS\n");
 				return -1;
 			}
 
@@ -437,6 +469,15 @@ swallow:
 
 			wsi->u.hdr.parser_state = (enum lws_token_indexes)
 							(WSI_TOKEN_GET_URI + n);
+
+			if( context->token_limits ) {
+				wsi->u.hdr.current_token_limit = \
+					context->token_limits->token_limit[wsi->u.hdr.parser_state];
+			}
+			else {
+				wsi->u.hdr.current_token_limit = sizeof(wsi->u.hdr.ah->data);
+			};
+
 			if (wsi->u.hdr.parser_state == WSI_TOKEN_CHALLENGE)
 				goto set_parsing_complete;
 
@@ -545,14 +586,6 @@ libwebsocket_rx_sm(struct libwebsocket *wsi, unsigned char c)
 	int n;
 	struct lws_tokens eff_buf;
 	int ret = 0;
-#ifndef LWS_NO_EXTENSIONS
-	int handled;
-	int m;
-#endif
-
-#if 0
-	lwsl_debug("RX: %02X ", c);
-#endif
 
 	switch (wsi->lws_rx_parse_state) {
 	case LWS_RXPS_NEW:
@@ -670,8 +703,13 @@ handle_first:
 				wsi->lws_rx_parse_state =
 						LWS_RXPS_07_COLLECT_FRAME_KEY_1;
 			else
-				wsi->lws_rx_parse_state =
+				if (wsi->u.ws.rx_packet_length)
+					wsi->lws_rx_parse_state =
 					LWS_RXPS_PAYLOAD_UNTIL_LENGTH_EXHAUSTED;
+				else {
+					wsi->lws_rx_parse_state = LWS_RXPS_NEW;
+					goto spill;
+				}
 			break;
 		}
 		break;
@@ -779,8 +817,10 @@ handle_first:
 		wsi->lws_rx_parse_state =
 					LWS_RXPS_PAYLOAD_UNTIL_LENGTH_EXHAUSTED;
 		wsi->u.ws.frame_mask_index = 0;
-		if (wsi->u.ws.rx_packet_length == 0)
+		if (wsi->u.ws.rx_packet_length == 0) {
+			wsi->lws_rx_parse_state = LWS_RXPS_NEW;
 			goto spill;
+		}
 		break;
 
 
@@ -879,10 +919,8 @@ spill:
 			break;
 
 		default:
-#ifndef LWS_NO_EXTENSIONS
 			lwsl_parser("passing opc %x up to exts\n",
 							wsi->u.ws.opcode);
-
 			/*
 			 * It's something special we can't understand here.
 			 * Pass the payload up to the extension's parsing
@@ -893,20 +931,9 @@ spill:
 						   LWS_SEND_BUFFER_PRE_PADDING];
 			eff_buf.token_len = wsi->u.ws.rx_user_buffer_head;
 
-			handled = 0;
-			for (n = 0; n < wsi->count_active_extensions; n++) {
-				m = wsi->active_extensions[n]->callback(
-					wsi->protocol->owning_server,
-					wsi->active_extensions[n], wsi,
-					LWS_EXT_CALLBACK_EXTENDED_PAYLOAD_RX,
-					    wsi->active_extensions_user[n],
-								   &eff_buf, 0);
-				if (m)
-					handled = 1;
-			}
-
-			if (!handled)
-#endif
+			if (lws_ext_callback_for_each_active(wsi,
+				LWS_EXT_CALLBACK_EXTENDED_PAYLOAD_RX,
+					&eff_buf, 0) <= 0) /* not handle or fail */
 				lwsl_ext("ext opc opcode 0x%x unknown\n",
 							      wsi->u.ws.opcode);
 
@@ -923,22 +950,11 @@ spill:
 		eff_buf.token = &wsi->u.ws.rx_user_buffer[
 						LWS_SEND_BUFFER_PRE_PADDING];
 		eff_buf.token_len = wsi->u.ws.rx_user_buffer_head;
-#ifndef LWS_NO_EXTENSIONS
-		for (n = 0; n < wsi->count_active_extensions; n++) {
-			m = wsi->active_extensions[n]->callback(
-				wsi->protocol->owning_server,
-				wsi->active_extensions[n], wsi,
-				LWS_EXT_CALLBACK_PAYLOAD_RX,
-				wsi->active_extensions_user[n],
-				&eff_buf, 0);
-			if (m < 0) {
-				lwsl_ext(
-				 "Extension '%s' failed to handle payload!\n",
-					      wsi->active_extensions[n]->name);
-				return -1;
-			}
-		}
-#endif
+		
+		if (lws_ext_callback_for_each_active(wsi,
+				LWS_EXT_CALLBACK_PAYLOAD_RX, &eff_buf, 0) < 0)
+			return -1;
+
 		if (eff_buf.token_len > 0) {
 			eff_buf.token[eff_buf.token_len] = '\0';
 
@@ -965,56 +981,6 @@ illegal_ctl_length:
 	lwsl_warn("Control frame with xtended length is illegal\n");
 	/* kill the connection */
 	return -1;
-}
-
-
-int libwebsocket_interpret_incoming_packet(struct libwebsocket *wsi,
-						 unsigned char *buf, size_t len)
-{
-	size_t n = 0;
-	int m;
-
-#if 0
-	lwsl_parser("received %d byte packet\n", (int)len);
-	lwsl_hexdump(buf, len);
-#endif
-
-	/* let the rx protocol state machine have as much as it needs */
-
-	while (n < len) {
-		/*
-		 * we were accepting input but now we stopped doing so
-		 */
-		if (!(wsi->u.ws.rxflow_change_to & LWS_RXFLOW_ALLOW)) {
-			/* his RX is flowcontrolled, don't send remaining now */
-			if (!wsi->u.ws.rxflow_buffer) {
-				/* a new rxflow, buffer it and warn caller */
-				lwsl_info("new rxflow input buffer len %d\n",
-								       len - n);
-				wsi->u.ws.rxflow_buffer =
-					       (unsigned char *)malloc(len - n);
-				wsi->u.ws.rxflow_len = len - n;
-				wsi->u.ws.rxflow_pos = 0;
-				memcpy(wsi->u.ws.rxflow_buffer,
-							buf + n, len - n);
-			} else
-				/* rxflow while we were spilling prev rxflow */
-				lwsl_info("stalling in existing rxflow buf\n");
-
-			return 1;
-		}
-
-		/* account for what we're using in rxflow buffer */
-		if (wsi->u.ws.rxflow_buffer)
-			wsi->u.ws.rxflow_pos++;
-
-		/* process the byte */
-		m = libwebsocket_rx_sm(wsi, buf[n++]);
-		if (m < 0)
-			return -1;
-	}
-
-	return 0;
 }
 
 

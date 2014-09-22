@@ -1,7 +1,7 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2013 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010-2014 Andy Green <andy@warmcat.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -20,10 +20,6 @@
  */
 
 #include "private-libwebsockets.h"
-
-#ifdef WIN32
-#include <io.h>
-#endif
 
 static int
 libwebsocket_0405_frame_mask_generate(struct libwebsocket *wsi)
@@ -98,231 +94,125 @@ int lws_issue_raw(struct libwebsocket *wsi, unsigned char *buf, size_t len)
 {
 	struct libwebsocket_context *context = wsi->protocol->owning_server;
 	int n;
-#ifndef LWS_NO_EXTENSIONS
+	size_t real_len = len;
 	int m;
+	
+	if (!len)
+		return 0;
+	/* just ignore sends after we cleared the truncation buffer */
+	if (wsi->state == WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE &&
+						!wsi->truncated_send_len)
+		return len;
 
-	/*
-	 * one of the extensions is carrying our data itself?  Like mux?
-	 */
-
-	for (n = 0; n < wsi->count_active_extensions; n++) {
-		/*
-		 * there can only be active extensions after handshake completed
-		 * so we can rely on protocol being set already in here
-		 */
-		m = wsi->active_extensions[n]->callback(
-				wsi->protocol->owning_server,
-				wsi->active_extensions[n], wsi,
-				LWS_EXT_CALLBACK_PACKET_TX_DO_SEND,
-				     wsi->active_extensions_user[n], &buf, len);
-		if (m < 0) {
-			lwsl_ext("Extension reports fatal error\n");
-			return -1;
-		}
-		if (m) /* handled */ {
-/*			lwsl_ext("ext sent it\n"); */
-			n = m;
-			goto handle_truncated_send;
-		}
+	if (wsi->truncated_send_len && (buf < wsi->truncated_send_malloc ||
+			buf > (wsi->truncated_send_malloc +
+				wsi->truncated_send_len +
+				wsi->truncated_send_offset))) {
+		lwsl_err("****** %x Sending new, pending truncated ...\n", wsi);
+		assert(0);
 	}
-#endif
+
+	m = lws_ext_callback_for_each_active(wsi,
+			LWS_EXT_CALLBACK_PACKET_TX_DO_SEND, &buf, len);
+	if (m < 0)
+		return -1;
+	if (m) /* handled */ {
+		n = m;
+		goto handle_truncated_send;
+	}
 	if (wsi->sock < 0)
 		lwsl_warn("** error invalid sock but expected to send\n");
 
 	/*
 	 * nope, send it on the socket directly
 	 */
-
-#if 0
-	lwsl_debug("  TX: ");
-	lws_hexdump(buf, len);
-#endif
-
 	lws_latency_pre(context, wsi);
-#ifdef LWS_OPENSSL_SUPPORT
-	if (wsi->ssl) {
-		n = SSL_write(wsi->ssl, buf, len);
-		lws_latency(context, wsi, "SSL_write lws_issue_raw", n, n >= 0);
-		if (n < 0) {
-			lwsl_debug("ERROR writing to socket\n");
-			return -1;
-		}
-	} else {
-#endif
-		n = send(wsi->sock, buf, len, MSG_NOSIGNAL);
-		lws_latency(context, wsi, "send lws_issue_raw", n, n == len);
-		if (n < 0) {
-			lwsl_debug("ERROR writing len %d to skt %d\n", len, n);
-			return -1;
-		}
-#ifdef LWS_OPENSSL_SUPPORT
+	n = lws_ssl_capable_write(wsi, buf, len);
+	lws_latency(context, wsi, "send lws_issue_raw", n, n == len);
+
+	switch (n) {
+	case LWS_SSL_CAPABLE_ERROR:
+		return -1;
+	case LWS_SSL_CAPABLE_MORE_SERVICE:
+		/* nothing got sent, not fatal, retry the whole thing later */
+		n = 0;
+		break;
 	}
-#endif
 
-#ifndef LWS_NO_EXTENSIONS
 handle_truncated_send:
-#endif
-
 	/*
-	 * already handling a truncated send?
+	 * we were already handling a truncated send?
 	 */
-	if (wsi->u.ws.truncated_send_malloc) {
-		lwsl_info("***** partial send moved on by %d (vs %d)\n", n, len);
-		wsi->u.ws.truncated_send_offset += n;
-		wsi->u.ws.truncated_send_len -= n;
+	if (wsi->truncated_send_len) {
+		lwsl_info("***** %x partial send moved on by %d (vs %d)\n",
+							     wsi, n, real_len);
+		wsi->truncated_send_offset += n;
+		wsi->truncated_send_len -= n;
 
-		if (!wsi->u.ws.truncated_send_len) {
-			lwsl_info("***** partial send completed\n");
-			/* done with it */
-			free(wsi->u.ws.truncated_send_malloc);
-			wsi->u.ws.truncated_send_malloc = NULL;
-		} else
-			libwebsocket_callback_on_writable(
+		if (!wsi->truncated_send_len) {
+			lwsl_info("***** %x partial send completed\n", wsi);
+			/* done with it, but don't free it */
+			n = real_len;
+			if (wsi->state == WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE) {
+				lwsl_info("***** %x signalling to close now\n", wsi);
+				return -1; /* retry closing now */
+			}
+		}
+		/* always callback on writeable */
+		libwebsocket_callback_on_writable(
 					     wsi->protocol->owning_server, wsi);
 
 		return n;
 	}
 
-	if (n < len) {
-		if (wsi->u.ws.clean_buffer)
-			/*
-			 * This buffer unaffected by extension rewriting.
-			 * It means the user code is expected to deal with
-			 * partial sends.  (lws knows the header was already
-			 * sent, so on next send will just resume sending
-			 * payload)
-			 */
-			 return n;
+	if (n == real_len)
+		/* what we just sent went out cleanly */
+		return n;
 
+	if (n && wsi->u.ws.clean_buffer)
 		/*
-		 * Newly truncated send.  Buffer the remainder (it will get
-		 * first priority next time the socket is writable)
+		 * This buffer unaffected by extension rewriting.
+		 * It means the user code is expected to deal with
+		 * partial sends.  (lws knows the header was already
+		 * sent, so on next send will just resume sending
+		 * payload)
 		 */
-		lwsl_info("***** new partial send %d sent %d accepted\n", len, n);
-
-		wsi->u.ws.truncated_send_malloc = (unsigned char *)malloc(len - n);
-		if (!wsi->u.ws.truncated_send_malloc) {
-			lwsl_err("truncated send: unable to malloc %d\n",
-								       len - n);
-			return -1;
-		}
-
-		wsi->u.ws.truncated_send_offset = 0;
-		wsi->u.ws.truncated_send_len = len - n;
-		memcpy(wsi->u.ws.truncated_send_malloc, buf + n, len - n);
-
-		libwebsocket_callback_on_writable(
-					     wsi->protocol->owning_server, wsi);
-
-		return len;
-	}
-
-	return n;
-}
-
-#ifdef LWS_NO_EXTENSIONS
-int
-lws_issue_raw_ext_access(struct libwebsocket *wsi,
-						 unsigned char *buf, size_t len)
-{
-	return lws_issue_raw(wsi, buf, len);
-}
-#else
-int
-lws_issue_raw_ext_access(struct libwebsocket *wsi,
-						 unsigned char *buf, size_t len)
-{
-	int ret;
-	struct lws_tokens eff_buf;
-	int m;
-	int n;
-
-	eff_buf.token = (char *)buf;
-	eff_buf.token_len = len;
+		 return n;
 
 	/*
-	 * while we have original buf to spill ourselves, or extensions report
-	 * more in their pipeline
+	 * Newly truncated send.  Buffer the remainder (it will get
+	 * first priority next time the socket is writable)
 	 */
+	lwsl_info("***** %x new partial sent %d from %d total\n",
+						      wsi, n, real_len);
 
-	ret = 1;
-	while (ret == 1) {
+	/*
+	 *  - if we still have a suitable malloc lying around, use it
+	 *  - or, if too small, reallocate it
+	 *  - or, if no buffer, create it
+	 */
+	if (!wsi->truncated_send_malloc ||
+			real_len - n > wsi->truncated_send_allocation) {
+		if (wsi->truncated_send_malloc)
+			free(wsi->truncated_send_malloc);
 
-		/* default to nobody has more to spill */
-
-		ret = 0;
-
-		/* show every extension the new incoming data */
-
-		for (n = 0; n < wsi->count_active_extensions; n++) {
-			m = wsi->active_extensions[n]->callback(
-					wsi->protocol->owning_server,
-					wsi->active_extensions[n], wsi,
-					LWS_EXT_CALLBACK_PACKET_TX_PRESEND,
-				   wsi->active_extensions_user[n], &eff_buf, 0);
-			if (m < 0) {
-				lwsl_ext("Extension: fatal error\n");
-				return -1;
-			}
-			if (m)
-				/*
-				 * at least one extension told us he has more
-				 * to spill, so we will go around again after
-				 */
-				ret = 1;
+		wsi->truncated_send_allocation = real_len - n;
+		wsi->truncated_send_malloc = malloc(real_len - n);
+		if (!wsi->truncated_send_malloc) {
+			lwsl_err("truncated send: unable to malloc %d\n",
+							  real_len - n);
+			return -1;
 		}
-
-		if ((char *)buf != eff_buf.token)
-			wsi->u.ws.clean_buffer = 0; /* extension recreated it: we need to buffer this if not all sent */
-
-		/* assuming they left us something to send, send it */
-
-		if (eff_buf.token_len) {
-			n = lws_issue_raw(wsi, (unsigned char *)eff_buf.token,
-							    eff_buf.token_len);
-			if (n < 0)
-				return -1;
-
-			/* always either sent it all or privately buffered */
-		}
-
-		lwsl_parser("written %d bytes to client\n", eff_buf.token_len);
-
-		/* no extension has more to spill?  Then we can go */
-
-		if (!ret)
-			break;
-
-		/* we used up what we had */
-
-		eff_buf.token = NULL;
-		eff_buf.token_len = 0;
-
-		/*
-		 * Did that leave the pipe choked?
-		 * Or we had to hold on to some of it?
-		 */
-
-		if (!lws_send_pipe_choked(wsi) &&
-					!wsi->u.ws.truncated_send_malloc)
-			/* no we could add more, lets's do that */
-			continue;
-
-		lwsl_debug("choked\n");
-
-		/*
-		 * Yes, he's choked.  Don't spill the rest now get a callback
-		 * when he is ready to send and take care of it there
-		 */
-		libwebsocket_callback_on_writable(
-					     wsi->protocol->owning_server, wsi);
-		wsi->extension_data_pending = 1;
-		ret = 0;
 	}
+	wsi->truncated_send_offset = 0;
+	wsi->truncated_send_len = real_len - n;
+	memcpy(wsi->truncated_send_malloc, buf + n, real_len - n);
 
-	return len;
+	/* since something buffered, force it to get another chance to send */
+	libwebsocket_callback_on_writable(wsi->protocol->owning_server, wsi);
+
+	return real_len;
 }
-#endif
 
 /**
  * libwebsocket_write() - Apply protocol then write data to client
@@ -364,10 +254,7 @@ LWS_VISIBLE int libwebsocket_write(struct libwebsocket *wsi, unsigned char *buf,
 	unsigned char *dropmask = NULL;
 	unsigned char is_masked_bit = 0;
 	size_t orig_len = len;
-#ifndef LWS_NO_EXTENSIONS
 	struct lws_tokens eff_buf;
-	int m;
-#endif
 
 	if (len == 0 && protocol != LWS_WRITE_CLOSE &&
 		     protocol != LWS_WRITE_PING && protocol != LWS_WRITE_PONG) {
@@ -391,7 +278,6 @@ LWS_VISIBLE int libwebsocket_write(struct libwebsocket *wsi, unsigned char *buf,
 	/* if he wants all partials buffered, never have a clean_buffer */
 	wsi->u.ws.clean_buffer = !wsi->protocol->no_buffer_all_partial_tx;
 
-#ifndef LWS_NO_EXTENSIONS
 	/*
 	 * give a chance to the extensions to modify payload
 	 * pre-TX mangling is not allowed to truncate
@@ -405,16 +291,9 @@ LWS_VISIBLE int libwebsocket_write(struct libwebsocket *wsi, unsigned char *buf,
 	case LWS_WRITE_CLOSE:
 		break;
 	default:
-
-		for (n = 0; n < wsi->count_active_extensions; n++) {
-			m = wsi->active_extensions[n]->callback(
-				wsi->protocol->owning_server,
-				wsi->active_extensions[n], wsi,
-				LWS_EXT_CALLBACK_PAYLOAD_TX,
-				wsi->active_extensions_user[n], &eff_buf, 0);
-			if (m < 0)
-				return -1;
-		}
+		if (lws_ext_callback_for_each_active(wsi,
+			       LWS_EXT_CALLBACK_PAYLOAD_TX, &eff_buf, 0) < 0)
+			return -1;
 	}
 
 	/*
@@ -423,11 +302,14 @@ LWS_VISIBLE int libwebsocket_write(struct libwebsocket *wsi, unsigned char *buf,
 	 * to this being issued
 	 */
 	if ((char *)buf != eff_buf.token)
-		wsi->u.ws.clean_buffer = 0; /* we need to buffer this if not all sent */
+		/*
+		 * extension recreated it:
+		 * need to buffer this if not all sent
+		 */
+		wsi->u.ws.clean_buffer = 0;
 
 	buf = (unsigned char *)eff_buf.token;
 	len = eff_buf.token_len;
-#endif
 
 	switch (wsi->ietf_spec_revision) {
 	case 13:
@@ -525,30 +407,25 @@ do_more_inside_frame:
 
 		if (!wsi->u.ws.inside_frame)
 			if (libwebsocket_0405_frame_mask_generate(wsi)) {
-				lwsl_err("lws_write: frame mask generation failed\n");
+				lwsl_err("frame mask generation failed\n");
 				return -1;
 			}
 
 		/*
 		 * in v7, just mask the payload
 		 */
-		for (n = 4; n < (int)len + 4; n++)
-			dropmask[n] = dropmask[n] ^
+		if (dropmask) { /* never set if already inside frame */
+			for (n = 4; n < (int)len + 4; n++)
+				dropmask[n] = dropmask[n] ^
 				wsi->u.ws.frame_masking_nonce_04[
 					(wsi->u.ws.frame_mask_index++) & 3];
 
-		if (dropmask) /* never set if already inside frame */
 			/* copy the frame nonce into place */
 			memcpy(dropmask, wsi->u.ws.frame_masking_nonce_04, 4);
+		}
 	}
 
 send_raw:
-
-#if 0
-	lwsl_debug("send %ld: ", len + post);
-	lwsl_hexdump(&buf[-pre], len + post);
-#endif
-
 	switch (protocol) {
 	case LWS_WRITE_CLOSE:
 /*		lwsl_hexdump(&buf[-pre], len + post); */
@@ -583,7 +460,7 @@ send_raw:
 	 */
 
 	n = lws_issue_raw_ext_access(wsi, buf - pre, len + pre + post);
-	if (n < 0)
+	if (n <= 0)
 		return n;
 
 	if (n == len + pre + post) {
@@ -605,12 +482,29 @@ send_raw:
 LWS_VISIBLE int libwebsockets_serve_http_file_fragment(
 		struct libwebsocket_context *context, struct libwebsocket *wsi)
 {
-	int n, m;
+	int n;
+	int m;
 
 	while (!lws_send_pipe_choked(wsi)) {
-		n = read(wsi->u.http.fd, context->service_buffer,
+
+		if (wsi->truncated_send_len) {
+			if (lws_issue_raw(wsi, wsi->truncated_send_malloc +
+					wsi->truncated_send_offset,
+						       wsi->truncated_send_len) < 0) {
+				lwsl_info("closing from libwebsockets_serve_http_file_fragment\n");
+				return -1;
+			}
+			continue;
+		}
+
+		if (wsi->u.http.filepos == wsi->u.http.filelen)
+			goto all_sent;
+
+		compatible_file_read(n, wsi->u.http.fd, context->service_buffer,
 					       sizeof(context->service_buffer));
-		if (n > 0) {
+		if (n < 0)
+			return -1; /* caller will close */
+		if (n) {
 			m = libwebsocket_write(wsi, context->service_buffer, n,
 								LWS_WRITE_HTTP);
 			if (m < 0)
@@ -619,13 +513,11 @@ LWS_VISIBLE int libwebsockets_serve_http_file_fragment(
 			wsi->u.http.filepos += m;
 			if (m != n)
 				/* adjust for what was not sent */
-				lseek(wsi->u.http.fd, m - n, SEEK_CUR);
+				compatible_file_seek_cur(wsi->u.http.fd, m - n);
 		}
-
-		if (n < 0)
-			return -1; /* caller will close */
-
-		if (wsi->u.http.filepos == wsi->u.http.filelen) {
+all_sent:
+		if (!wsi->truncated_send_len &&
+				wsi->u.http.filepos == wsi->u.http.filelen) {
 			wsi->state = WSI_STATE_HTTP;
 
 			if (wsi->protocol->callback)
@@ -638,8 +530,42 @@ LWS_VISIBLE int libwebsockets_serve_http_file_fragment(
 		}
 	}
 
-	lwsl_notice("choked before able to send whole file (post)\n");
+	lwsl_info("choked before able to send whole file (post)\n");
 	libwebsocket_callback_on_writable(context, wsi);
 
 	return 0; /* indicates further processing must be done */
+}
+
+LWS_VISIBLE int
+lws_ssl_capable_read_no_ssl(struct libwebsocket *wsi, unsigned char *buf, int len)
+{
+	int n;
+
+	n = recv(wsi->sock, buf, len, 0);
+	if (n >= 0)
+		return n;
+
+	lwsl_warn("error on reading from skt\n");
+	return LWS_SSL_CAPABLE_ERROR;
+}
+
+LWS_VISIBLE int
+lws_ssl_capable_write_no_ssl(struct libwebsocket *wsi, unsigned char *buf, int len)
+{
+	int n;
+	
+	n = send(wsi->sock, buf, len, 0);
+	if (n >= 0)
+		return n;
+
+	if (LWS_ERRNO == LWS_EAGAIN ||
+	    LWS_ERRNO == LWS_EWOULDBLOCK ||
+	    LWS_ERRNO == LWS_EINTR) {
+		if (LWS_ERRNO == LWS_EWOULDBLOCK)
+			lws_set_blocking_send(wsi);
+
+		return LWS_SSL_CAPABLE_MORE_SERVICE;
+	}
+	lwsl_debug("ERROR writing len %d to skt %d\n", len, n);
+	return LWS_SSL_CAPABLE_ERROR;
 }
