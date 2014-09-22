@@ -141,7 +141,7 @@ SHA1(const unsigned char *d, size_t n, unsigned char *md);
 #define AWAITING_TIMEOUT 5
 #endif
 #ifndef CIPHERS_LIST_STRING
-#define CIPHERS_LIST_STRING "DEFAULT"
+#define CIPHERS_LIST_STRING "RC4-MD5:RC4-SHA:AES128-SHA:AES256-SHA:HIGH:!DSS:!aNULL"
 #endif
 #ifndef LWS_SOMAXCONN
 #define LWS_SOMAXCONN SOMAXCONN
