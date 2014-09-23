@@ -30,14 +30,15 @@ OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 	int n;
 	struct libwebsocket_context *context;
 
-	ssl = X509_STORE_CTX_get_ex_data(x509_ctx,
+	ssl = (SSL *)X509_STORE_CTX_get_ex_data(x509_ctx,
 		SSL_get_ex_data_X509_STORE_CTX_idx());
 
 	/*
 	 * !!! nasty openssl requires the index to come as a library-scope
 	 * static
 	 */
-	context = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+	context = (libwebsocket_context *)
+        SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
 
 	n = context->protocols[0].callback(NULL, NULL,
 		LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION,
@@ -65,7 +66,7 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 #else
 		lwsl_notice(" Compiled with OpenSSL support\n");
 #endif
-		
+
 		if (info->ssl_cipher_list)
 			lwsl_notice(" SSL ciphers: '%s'\n", info->ssl_cipher_list);
 
@@ -93,7 +94,7 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 	SSL_load_error_strings();
 
 	openssl_websocket_private_data_index =
-		SSL_get_ex_new_index(0, "libwebsockets", NULL, NULL, NULL);
+		SSL_get_ex_new_index(0, (char *)"libwebsockets", NULL, NULL, NULL);
 
 	/*
 	 * Firefox insists on SSLv23 not SSLv3
