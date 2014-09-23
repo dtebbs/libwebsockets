@@ -270,7 +270,7 @@ int lws_handshake_server(struct libwebsocket_context *context,
 				n = wsi->protocol->rx_buffer_size;
 				if (!n)
 					n = LWS_MAX_SOCKET_IO_BUF;
-				wsi->u.http.post_buffer = malloc(n);
+				wsi->u.http.post_buffer = (unsigned char *)malloc(n);
 				if (!wsi->u.http.post_buffer) {
 					lwsl_err("Unable to allocate post buffer\n");
 					n = -1;
@@ -419,7 +419,7 @@ cleanup:
 		if (!n)
 			n = LWS_MAX_SOCKET_IO_BUF;
 		n += LWS_SEND_BUFFER_PRE_PADDING + LWS_SEND_BUFFER_POST_PADDING;
-		wsi->u.ws.rx_user_buffer = malloc(n);
+		wsi->u.ws.rx_user_buffer = (char *)malloc(n);
 		if (!wsi->u.ws.rx_user_buffer) {
 			lwsl_err("Out of Mem allocating rx buffer %d\n", n);
 			return 1;
@@ -548,7 +548,7 @@ int lws_server_socket_service(struct libwebsocket_context *context,
 
 			/* just ignore incoming if waiting for close */
 			if (wsi->state != WSI_STATE_FLUSHING_STORED_SEND_BEFORE_CLOSE) {
-			
+
 				/* hm this may want to send (via HTTP callback for example) */
 
 				n = libwebsocket_read(context, wsi,

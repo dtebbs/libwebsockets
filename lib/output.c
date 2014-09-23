@@ -197,7 +197,7 @@ handle_truncated_send:
 			free(wsi->truncated_send_malloc);
 
 		wsi->truncated_send_allocation = real_len - n;
-		wsi->truncated_send_malloc = malloc(real_len - n);
+		wsi->truncated_send_malloc = (unsigned char *)malloc(real_len - n);
 		if (!wsi->truncated_send_malloc) {
 			lwsl_err("truncated send: unable to malloc %d\n",
 							  real_len - n);
