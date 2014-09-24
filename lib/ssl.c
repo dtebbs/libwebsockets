@@ -37,7 +37,7 @@ OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 	 * !!! nasty openssl requires the index to come as a library-scope
 	 * static
 	 */
-	context = (libwebsocket_context *)
+	context = (struct libwebsocket_context *)
         SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
 
 	n = context->protocols[0].callback(NULL, NULL,

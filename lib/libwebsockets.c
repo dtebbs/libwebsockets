@@ -443,7 +443,7 @@ libwebsocket_callback_all_protocol(
 			continue;
 		if (wsi->protocol == protocol)
 			protocol->callback(context, wsi,
-                               (libwebsocket_callback_reasons)reason, wsi->user_space, NULL, 0);
+                               (enum libwebsocket_callback_reasons)reason, wsi->user_space, NULL, 0);
 	}
 
 	return 0;

@@ -52,7 +52,7 @@ int lws_ext_callback_for_each_active(struct libwebsocket *wsi, int reason,
 		m = wsi->active_extensions[n]->callback(
 			wsi->protocol->owning_server,
 			wsi->active_extensions[n], wsi,
-			(libwebsocket_extension_callback_reasons)reason,
+			(enum libwebsocket_extension_callback_reasons)reason,
 			wsi->active_extensions_user[n],
 			arg, len);
 		if (m < 0) {
@@ -76,7 +76,7 @@ int lws_ext_callback_for_each_extension_type(
 	struct libwebsocket_extension *ext = context->extensions;
 
 	while (ext && ext->callback && !handled) {
-		m = ext->callback(context, ext, wsi, (libwebsocket_extension_callback_reasons)reason,
+		m = ext->callback(context, ext, wsi, (enum libwebsocket_extension_callback_reasons)reason,
 						(void *)(long)n, arg, len);
 		if (m < 0) {
 			lwsl_ext(
