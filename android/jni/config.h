@@ -12,16 +12,28 @@
 #define LWS_LIBRARY_VERSION "1.3"
 
 /* The current git commit hash that we're building from */
-#define LWS_BUILD_HASH "3dc6cda"
+#define LWS_BUILD_HASH "cd30b46"
 
 /* Build with OpenSSL support */
 #define LWS_OPENSSL_SUPPORT
+
+/* The client should load and trust CA root certs it finds in the OS */
+#define LWS_SSL_CLIENT_USE_OS_CA_CERTS
 
 /* Sets the path where the client certs should be installed. */
 #define LWS_OPENSSL_CLIENT_CERTS "/etc/pki/tls/certs/"
 
 /* Turn off websocket extensions */
 /* #undef LWS_NO_EXTENSIONS */
+
+/* Enable libev io loop */
+/* #undef LWS_USE_LIBEV */
+
+/* Build with support for ipv6 */
+// #define LWS_USE_IPV6
+
+/* Build with support for HTTP2 */
+#define LWS_USE_HTTP2
 
 /* Turn on latency measuring code */
 /* #undef LWS_LATENCY */
@@ -52,6 +64,12 @@
 
 /* Define to 1 if you have the `fork' function. */
 #define HAVE_FORK
+
+/* Define to 1 if you have the `getenv’ function. */
+#define HAVE_GETENV
+
+/* Define to 1 if you have the <in6addr.h> header file. */
+/* #undef HAVE_IN6ADDR_H */
 
 /* Define to 1 if you have the <inttypes.h> header file. */
 #define HAVE_INTTYPES_H
