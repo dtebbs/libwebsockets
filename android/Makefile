@@ -1,9 +1,9 @@
 
 websockets:
 
-BUILDDIR := ../../../tzbuild
+BUILDDIR ?= ../../../tzbuild
 
-ANDROID_NDK := $(BUILDDIR)/../android/android-ndk-r9b
+ANDROID_NDK ?= $(BUILDDIR)/../android/android-ndk-r9b
 
 include $(BUILDDIR)/config.mk
 
