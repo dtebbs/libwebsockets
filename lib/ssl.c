@@ -24,31 +24,6 @@
 
 int openssl_websocket_private_data_index;
 
-#ifndef LWS_NO_SERVER
-static int
-OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
-{
-	SSL *ssl;
-	int n;
-	struct libwebsocket_context *context;
-
-	ssl = X509_STORE_CTX_get_ex_data(x509_ctx,
-		SSL_get_ex_data_X509_STORE_CTX_idx());
-
-	/*
-	 * !!! nasty openssl requires the index to come as a library-scope
-	 * static
-	 */
-	context = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
-
-	n = context->protocols[0].callback(NULL, NULL,
-		LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION,
-						   x509_ctx, ssl, preverify_ok);
-
-	/* convert return code from 0 = OK to 1 = OK */
-	return !n;
-}
-
 static int lws_context_init_ssl_pem_passwd_cb(char * buf, int size, int rwflag, void *userdata)
 {
 	struct lws_context_creation_info * info = (struct lws_context_creation_info *)userdata;
@@ -74,6 +49,31 @@ static void lws_ssl_bind_passphrase(SSL_CTX *ssl_ctx,
 				      lws_context_init_ssl_pem_passwd_cb);
 }
 
+#ifndef LWS_NO_SERVER
+static int
+OpenSSL_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
+{
+	SSL *ssl;
+	int n;
+	struct libwebsocket_context *context;
+
+	ssl = X509_STORE_CTX_get_ex_data(x509_ctx,
+		SSL_get_ex_data_X509_STORE_CTX_idx());
+
+	/*
+	 * !!! nasty openssl requires the index to come as a library-scope
+	 * static
+	 */
+	context = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+
+	n = context->protocols[0].callback(NULL, NULL,
+		LWS_CALLBACK_OPENSSL_PERFORM_CLIENT_CERT_VERIFICATION,
+						   x509_ctx, ssl, preverify_ok);
+
+	/* convert return code from 0 = OK to 1 = OK */
+	return !n;
+}
+
 LWS_VISIBLE int
 lws_context_init_server_ssl(struct lws_context_creation_info *info,
 		     struct libwebsocket_context *context)
@@ -84,8 +84,8 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 
 	if (info->port != CONTEXT_PORT_NO_LISTEN) {
 
-		context->use_ssl = info->ssl_cert_filepath != NULL &&
-					 info->ssl_private_key_filepath != NULL;
+		context->use_ssl = info->ssl_cert_filepath != NULL;
+
 #ifdef USE_CYASSL
 		lwsl_notice(" Compiled with CYASSL support\n");
 #else
@@ -190,18 +190,29 @@ lws_context_init_server_ssl(struct lws_context_creation_info *info,
 			return 1;
 		}
 		lws_ssl_bind_passphrase(context->ssl_ctx, info);
-		/* set the private key from KeyFile */
-		if (SSL_CTX_use_PrivateKey_file(context->ssl_ctx,
-			     info->ssl_private_key_filepath,
+
+		if (info->ssl_private_key_filepath != NULL) {
+			/* set the private key from KeyFile */
+			if (SSL_CTX_use_PrivateKey_file(context->ssl_ctx,
+				     info->ssl_private_key_filepath,
 						       SSL_FILETYPE_PEM) != 1) {
-			error = ERR_get_error();
-			lwsl_err("ssl problem getting key '%s' %lu: %s\n",
-				info->ssl_private_key_filepath,
-					error,
-					ERR_error_string(error,
-					      (char *)context->service_buffer));
-			return 1;
+				error = ERR_get_error();
+				lwsl_err("ssl problem getting key '%s' %lu: %s\n",
+					info->ssl_private_key_filepath,
+						error,
+						ERR_error_string(error,
+						      (char *)context->service_buffer));
+				return 1;
+			}
 		}
+		else {
+			if (context->protocols[0].callback(context, NULL,
+				LWS_CALLBACK_OPENSSL_CONTEXT_REQUIRES_PRIVATE_KEY,
+						context->ssl_ctx, NULL, 0))
+				lwsl_err("ssl private key not set\n");
+				return 1;
+		}
+
 		/* verify private key */
 		if (!SSL_CTX_check_private_key(context->ssl_ctx)) {
 			lwsl_err("Private SSL key doesn't match cert\n");
@@ -480,7 +491,7 @@ lws_server_socket_service_ssl(struct libwebsocket_context *context,
 			    ERR_error_string(SSL_get_error(
 			    new_wsi->ssl, 0), NULL));
 			    libwebsockets_decode_ssl_error();
-			free(new_wsi);
+			lws_free(new_wsi);
 			compatible_close(accept_fd);
 			break;
 		}
@@ -592,9 +603,7 @@ lws_server_socket_service_ssl(struct libwebsocket_context *context,
 		}
 		lwsl_debug("SSL_accept failed skt %u: %s\n",
 					 pollfd->fd, ERR_error_string(m, NULL));
-		libwebsocket_close_and_free_session(context, wsi,
-						     LWS_CLOSE_STATUS_NOSTATUS);
-		break;
+		goto fail;
 
 accepted:
 		/* OK, we are accepted... give him some time to negotiate */

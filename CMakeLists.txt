@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 2.8)
 
-project(libwebsockets)
+project(libwebsockets C)
 
 set(PACKAGE "libwebsockets")
 set(CPACK_PACKAGE_NAME "${PACKAGE}")
@@ -260,11 +260,11 @@ include_directories("${PROJECT_SOURCE_DIR}/lib")
 # Some IDEs use this for nicer file structure.
 set(HDR_PRIVATE
 	lib/private-libwebsockets.h
-	"${PROJECT_BINARY_DIR}/lws_config.h"
 	)
 
 set(HDR_PUBLIC	
 	"${PROJECT_SOURCE_DIR}/lib/libwebsockets.h"
+	"${PROJECT_BINARY_DIR}/lws_config.h"
 	)
 
 set(SOURCES
@@ -277,6 +277,7 @@ set(SOURCES
 	lib/parsers.c
 	lib/context.c
 	lib/sha-1.c
+	lib/alloc.c
 	)
 
 if (NOT LWS_WITHOUT_CLIENT)

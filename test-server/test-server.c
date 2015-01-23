@@ -154,10 +154,6 @@ static int callback_http(struct libwebsocket_context *context,
 		enum libwebsocket_callback_reasons reason, void *user,
 							   void *in, size_t len)
 {
-#if 0
-	char client_name[128];
-	char client_ip[128];
-#endif
 	char buf[256];
 	char leaf_path[1024];
 	char b64[64];
@@ -216,7 +212,8 @@ static int callback_http(struct libwebsocket_context *context,
 			if (pss->fd < 0)
 				return -1;
 
-			fstat(pss->fd, &stat_buf);
+			if (fstat(pss->fd, &stat_buf) < 0)
+				return -1;
 
 			/*
 			 * we will send a big jpeg file, but it could be
@@ -230,11 +227,18 @@ static int callback_http(struct libwebsocket_context *context,
 			 */
 			if (lws_add_http_header_status(context, wsi, 200, &p, end))
 				return 1;
-			if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_SERVER, (unsigned char *)"libwebsockets", 13, &p, end))
+			if (lws_add_http_header_by_token(context, wsi,
+					WSI_TOKEN_HTTP_SERVER,
+				    	(unsigned char *)"libwebsockets",
+					13, &p, end))
 				return 1;
-			if (lws_add_http_header_by_token(context, wsi, WSI_TOKEN_HTTP_CONTENT_TYPE, (unsigned char *)"image/jpeg", 10, &p, end))
+			if (lws_add_http_header_by_token(context, wsi,
+					WSI_TOKEN_HTTP_CONTENT_TYPE,
+				    	(unsigned char *)"image/jpeg",
+					10, &p, end))
 				return 1;
-			if (lws_add_http_header_content_length(context, wsi,stat_buf.st_size, &p, end))
+			if (lws_add_http_header_content_length(context, wsi,
+						stat_buf.st_size, &p, end))
 				return 1;
 			if (lws_finalize_http_header(context, wsi, &p, end))
 				return 1;
@@ -251,9 +255,9 @@ static int callback_http(struct libwebsocket_context *context,
 			 */
 
 			n = libwebsocket_write(wsi,
-					       buffer + LWS_SEND_BUFFER_PRE_PADDING,
-					       p - (buffer + LWS_SEND_BUFFER_PRE_PADDING),
-					       LWS_WRITE_HTTP_HEADERS);
+					buffer + LWS_SEND_BUFFER_PRE_PADDING,
+					p - (buffer + LWS_SEND_BUFFER_PRE_PADDING),
+					LWS_WRITE_HTTP_HEADERS);
 
 			if (n < 0) {
 				close(pss->fd);
@@ -391,7 +395,8 @@ static int callback_http(struct libwebsocket_context *context,
 			 */
 			if (m != n)
 				/* partial write, adjust */
-				lseek(pss->fd, m - n, SEEK_CUR);
+				if (lseek(pss->fd, m - n, SEEK_CUR) < 0)
+					goto bail;
 
 			if (m) /* while still active, extend timeout */
 				libwebsocket_set_timeout(wsi,
@@ -428,13 +433,7 @@ bail:
 	 */
 
 	case LWS_CALLBACK_FILTER_NETWORK_CONNECTION:
-#if 0
-		libwebsockets_get_peer_addresses(context, wsi, (int)(long)in, client_name,
-			     sizeof(client_name), client_ip, sizeof(client_ip));
 
-		fprintf(stderr, "Received network connect from %s (%s)\n",
-							client_name, client_ip);
-#endif
 		/* if we returned non-zero from here, we kill the connection */
 		break;
 

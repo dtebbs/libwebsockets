@@ -55,7 +55,6 @@ lws_handle_POLLOUT_event(struct libwebsocket_context *context,
 #endif
 	int ret;
 	int m;
-	int handled = 0;
 
 	/* pending truncated sends have uber priority */
 
@@ -111,10 +110,8 @@ lws_handle_POLLOUT_event(struct libwebsocket_context *context,
 	
 	m = lws_ext_callback_for_each_active(wsi, LWS_EXT_CALLBACK_IS_WRITEABLE,
 								       NULL, 0);
-	if (handled == 1)
-		goto notify_action;
 #ifndef LWS_NO_EXTENSIONS
-	if (!wsi->extension_data_pending || handled == 2)
+	if (!wsi->extension_data_pending)
 		goto user_service;
 #endif
 	/*
@@ -211,7 +208,6 @@ user_service:
 		lws_libev_io(context, wsi, LWS_EV_STOP | LWS_EV_WRITE);
 	}
 
-notify_action:
 #ifdef LWS_USE_HTTP2
 	/* 
 	 * we are the 'network wsi' for potentially many muxed child wsi with
@@ -305,7 +301,7 @@ int lws_rxflow_cache(struct libwebsocket *wsi, unsigned char *buf, int n, int le
 
 	/* a new rxflow, buffer it and warn caller */
 	lwsl_info("new rxflow input buffer len %d\n", len - n);
-	wsi->rxflow_buffer = (unsigned char *)malloc(len - n);
+	wsi->rxflow_buffer = lws_malloc(len - n);
 	wsi->rxflow_len = len - n;
 	wsi->rxflow_pos = 0;
 	memcpy(wsi->rxflow_buffer, buf + n, len - n);
@@ -386,7 +382,8 @@ libwebsocket_service_fd(struct libwebsocket_context *context,
 					/* it was the guy we came to service! */
 					timed_out = 1;
 					/* mark as handled */
-					pollfd->revents = 0;
+					if (pollfd)
+						pollfd->revents = 0;
 				}
 		}
 	}
@@ -566,10 +563,12 @@ drain:
 		if (draining_flow && wsi->rxflow_buffer &&
 				 wsi->rxflow_pos == wsi->rxflow_len) {
 			lwsl_info("flow buffer: drained\n");
-			free(wsi->rxflow_buffer);
-			wsi->rxflow_buffer = NULL;
+			lws_free2(wsi->rxflow_buffer);
 			/* having drained the rxflow buffer, can rearm POLLIN */
-			n = _libwebsocket_rx_flow_control(wsi); /* n ignored, needed for NO_SERVER case */
+#ifdef LWS_NO_SERVER
+			n =
+#endif
+			_libwebsocket_rx_flow_control(wsi); /* n ignored, needed for NO_SERVER case */
 		}
 
 		break;

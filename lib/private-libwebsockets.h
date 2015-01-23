@@ -209,6 +209,12 @@ typedef unsigned __int64 u_int64_t;
 #include <endian.h>
 #endif
 
+#include <stddef.h>
+
+#ifndef container_of
+#define container_of(P,T,M)	((T *)((char *)(P) - offsetof(T, M)))
+#endif
+
 #if defined(__QNX__)
 	#include <gulliver.h>
 	#if defined(__LITTLEENDIAN__)
@@ -859,9 +865,9 @@ lws_rxflow_cache(struct libwebsocket *wsi, unsigned char *buf, int n, int len);
 #ifndef LWS_LATENCY
 static inline void lws_latency(struct libwebsocket_context *context,
 		struct libwebsocket *wsi, const char *action,
-					 int ret, int completion) { while (0); }
+					 int ret, int completion) { do { } while (0); }
 static inline void lws_latency_pre(struct libwebsocket_context *context,
-					struct libwebsocket *wsi) { while (0); }
+					struct libwebsocket *wsi) { do { } while (0); }
 #else
 #define lws_latency_pre(_context, _wsi) lws_latency(_context, _wsi, NULL, 0, 0)
 extern void
@@ -1156,6 +1162,19 @@ lws_ssl_capable_write_no_ssl(struct libwebsocket *wsi, unsigned char *buf, int l
 #define _libwebsocket_rx_flow_control(_a) (0)
 #define lws_handshake_server(_a, _b, _c, _d) (0)
 #endif
+
+/*
+ * custom allocator
+ */
+LWS_EXTERN void*
+lws_realloc(void *ptr, size_t size);
+
+LWS_EXTERN void*
+lws_zalloc(size_t size);
+
+#define lws_malloc(S)	lws_realloc(NULL, S)
+#define lws_free(P)	lws_realloc(P, 0)
+#define lws_free2(P)	do { lws_realloc(P, 0); (P) = NULL; } while(0)
 
 /*
  * lws_plat_
